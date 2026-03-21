@@ -1,6 +1,6 @@
 # data-cbs-interview
 
-A production-grade DataOps pipeline that ingests daily financial price data, transforms it into enriched analytics-ready Parquet files, and loads it into a MotherDuck cloud data warehouse. Built as part of a Senior DataOps Engineer interview task.
+A Data pipeline that ingests daily financial price data, transforms it into enriched analytics-ready Parquet files, and loads it into a MotherDuck cloud data warehouse.
 
 ---
 
