@@ -42,6 +42,10 @@ jobs:
           # Only SHA tag — ECR repos have immutable tags enabled so :latest cannot be reused
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          platforms: linux/amd64
+          # Disable provenance attestation — prevents BuildKit creating an Image Index
+          # + untagged attestation blob in ECR (one clean Image per push instead)
+          provenance: false
           # Cache Docker layers in GitHub Actions cache between runs.
           # mode=max caches intermediate (builder) layers too, not just the final image.
           # Unchanged layers (e.g. uv sync when pyproject.toml is untouched) are instant.
