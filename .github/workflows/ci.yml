@@ -18,6 +18,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Required to enable BuildKit cache support (type=gha)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -35,7 +39,11 @@ jobs:
           context: .
           file: docker/Dockerfile
           # Push on direct branch commits only (not PRs); dev → dev ECR, main → prod ECR
+          # Only SHA tag — ECR repos have immutable tags enabled so :latest cannot be reused
           push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:latest
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          # Cache Docker layers in GitHub Actions cache between runs.
+          # mode=max caches intermediate (builder) layers too, not just the final image.
+          # Unchanged layers (e.g. uv sync when pyproject.toml is untouched) are instant.
+          cache-from: type=gha,scope=${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=${{ github.ref_name }}
