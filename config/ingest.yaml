@@ -1,0 +1,21 @@
+# Ingest pipeline configuration
+# Non-secret values only — secrets live in AWS SSM Parameter Store.
+
+yfinance:
+  period: "3mo"        # How far back to fetch: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
+  interval: "1d"      # Bar size: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
+  auto_adjust: true   # Adjust OHLC for splits and dividends
+
+s3:
+  raw_prefix: "raw/prices"   # S3 key prefix for raw CSV files
+
+ssm:
+  region: "eu-west-2"
+  parameters:
+    s3_bucket_raw: "s3_bucket_raw"   # SSM parameter name for the raw S3 bucket
+    symbols: "symbols"               # SSM parameter name for comma-separated symbols list (Company abbreviations, e.g. "IBM,AAPL,MSFT")
+    aws_region: "aws_region"         # SSM parameter name for the AWS region override
+
+defaults:
+  symbols: "IBM,AAPL,MSFT"   # Fallback if SSM parameter not found
+  aws_region: "eu-west-2"    # Fallback if SSM parameter not found

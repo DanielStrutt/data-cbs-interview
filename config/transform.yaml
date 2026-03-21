@@ -1,0 +1,29 @@
+# Transform pipeline configuration
+# Non-secret values only — secrets and bucket names live in AWS SSM Parameter Store.
+
+s3:
+  raw_prefix: "raw/prices"           # Where to read raw CSVs from (source bucket)
+  processed_prefix: "processed/prices"  # Where to write Parquet files (staging bucket)
+
+columns:
+  # Rename map applied after flattening yfinance MultiIndex headers
+  rename:
+    Open: "open"
+    High: "high"
+    Low: "low"
+    Close: "close"
+    Volume: "volume"
+
+derived_fields:
+  daily_return: true        # (close - prev_close) / prev_close
+  moving_avg_10: true       # 10-day rolling mean of close
+
+ssm:
+  region: "eu-west-2"
+  parameters:
+    s3_bucket_raw: "s3_bucket_raw"           # Source bucket
+    s3_bucket_staging: "s3_bucket_staging"   # Target bucket
+    aws_region: "aws_region"
+
+defaults:
+  aws_region: "eu-west-2"

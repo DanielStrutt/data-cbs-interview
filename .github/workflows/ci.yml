@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]   # dev → ECR_REPO_DEV; main → ECR_REPO_PROD
+  pull_request:
+    branches: [main]        # PR to main: build-only, no push (validation)
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    env:
+      # dev branch and PRs use the dev ECR repo; main branch (PR merges) uses prod
+      ECR_REPO: ${{ github.ref == 'refs/heads/main' && secrets.ECR_REPO_PROD || secrets.ECR_REPO_DEV }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-2
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          # Push on direct branch commits only (not PRs); dev → dev ECR, main → prod ECR
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:latest

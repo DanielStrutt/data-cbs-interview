@@ -1,0 +1,20 @@
+# Load pipeline configuration
+# Non-secret values only — secrets and bucket names live in AWS SSM Parameter Store.
+
+motherduck:
+  # database is derived from the ENV environment variable (dev or prod)
+  schema: "main"
+  table: "prices"
+
+s3:
+  processed_prefix: "processed/prices"   # Where to read Parquet files from
+
+ssm:
+  region: "eu-west-2"
+  parameters:
+    s3_bucket_staging: "s3_bucket_staging"   # Staging bucket (Parquet source)
+    motherduck_token: "motherduck_token"      # MotherDuck access token
+    aws_region: "aws_region"
+
+defaults:
+  aws_region: "eu-west-2"
