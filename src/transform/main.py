@@ -14,19 +14,17 @@ Bucket names are pulled from AWS SSM Parameter Store.
 
 import io
 import logging
-from datetime import datetime, timezone
+import os
 
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
 
+from src.monitoring.logger import setup_logging
+from src.monitoring.metrics import StageMetrics
 from src.utils.config_loader import load_config
 from src.utils.get_parameter import get_parameter
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -101,43 +99,57 @@ def write_parquet(s3_client, df: pd.DataFrame, bucket: str, key: str) -> None:
 
 
 def main() -> None:
+    env = os.environ.get("ENV", "dev")
     cfg = load_config("transform.yaml")
 
     ssm_params = cfg["ssm"]["parameters"]
     ssm_region = cfg["ssm"]["region"]
 
-    raw_bucket     = get_parameter(ssm_params["s3_bucket_raw"], region=ssm_region)
-    staging_bucket = get_parameter(ssm_params["s3_bucket_staging"], region=ssm_region)
-    region         = get_parameter(ssm_params["aws_region"], region=ssm_region, required=False) or cfg["defaults"]["aws_region"]
+    setup_logging("transform", env)
+    metrics = StageMetrics("transform", region=ssm_region, env=env)
+    metrics.start()
 
-    raw_prefix       = cfg["s3"]["raw_prefix"]
-    processed_prefix = cfg["s3"]["processed_prefix"]
-    rename_map       = cfg["columns"]["rename"]
-    derived          = cfg["derived_fields"]
+    try:
+        raw_bucket     = get_parameter(ssm_params["s3_bucket_raw"], region=ssm_region)
+        staging_bucket = get_parameter(ssm_params["s3_bucket_staging"], region=ssm_region)
+        region         = get_parameter(ssm_params["aws_region"], region=ssm_region, required=False) or cfg["defaults"]["aws_region"]
 
-    s3 = boto3.client("s3", region_name=region)
+        raw_prefix       = cfg["s3"]["raw_prefix"]
+        processed_prefix = cfg["s3"]["processed_prefix"]
+        rename_map       = cfg["columns"]["rename"]
+        derived          = cfg["derived_fields"]
 
-    raw_keys = list_raw_files(s3, raw_bucket, raw_prefix)
-    logger.info("Found %d raw file(s) to process", len(raw_keys))
+        s3 = boto3.client("s3", region_name=region)
 
-    for raw_key in raw_keys:
-        # raw_key shape: raw/prices/<SYMBOL>/<DATE>.csv
-        parts = raw_key.split("/")
-        symbol   = parts[-2]
-        date_str = parts[-1].replace(".csv", "")
+        raw_keys = list_raw_files(s3, raw_bucket, raw_prefix)
+        logger.info("Found %d raw file(s) to process", len(raw_keys))
 
-        out_key = f"{processed_prefix}/{symbol}/{date_str}.parquet"
+        files_written = 0
+        rows_written = 0
+        for raw_key in raw_keys:
+            # raw_key shape: raw/prices/<SYMBOL>/<DATE>.csv
+            parts = raw_key.split("/")
+            symbol   = parts[-2]
+            date_str = parts[-1].replace(".csv", "")
 
-        if s3_key_exists(s3, staging_bucket, out_key):
-            logger.info("Already processed, skipping: s3://%s/%s", staging_bucket, out_key)
-            continue
+            out_key = f"{processed_prefix}/{symbol}/{date_str}.parquet"
 
-        logger.info("Processing: s3://%s/%s", raw_bucket, raw_key)
-        df_raw = read_raw_csv(s3, raw_bucket, raw_key)
-        df_transformed = transform(df_raw, symbol, rename_map, derived)
-        write_parquet(s3, df_transformed, staging_bucket, out_key)
+            if s3_key_exists(s3, staging_bucket, out_key):
+                logger.info("Already processed, skipping: s3://%s/%s", staging_bucket, out_key)
+                continue
 
-    logger.info("Transform complete.")
+            logger.info("Processing: s3://%s/%s", raw_bucket, raw_key)
+            df_raw = read_raw_csv(s3, raw_bucket, raw_key)
+            df_transformed = transform(df_raw, symbol, rename_map, derived)
+            write_parquet(s3, df_transformed, staging_bucket, out_key)
+            files_written += 1
+            rows_written += len(df_transformed)
+
+        logger.info("Transform complete.")
+        metrics.finish(files_processed=files_written, rows_processed=rows_written)
+    except Exception:
+        metrics.finish(success=False)
+        raise
 
 
 if __name__ == "__main__":

@@ -14,19 +14,18 @@ are driven from config/ingest.yaml. Secrets are pulled from AWS SSM Parameter St
 
 import io
 import logging
+import os
 from datetime import datetime, timezone
 
 import boto3
 import yfinance as yf
 from botocore.exceptions import ClientError
 
+from src.monitoring.logger import setup_logging
+from src.monitoring.metrics import StageMetrics
 from src.utils.config_loader import load_config
 from src.utils.get_parameter import get_parameter
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -53,13 +52,16 @@ def fetch_raw_csv(symbol: str, period: str, interval: str, auto_adjust: bool) ->
     return buffer.getvalue()
 
 
-def upload_symbol(s3_client, bucket: str, prefix: str, symbol: str, run_date: str, yf_cfg: dict) -> None:
-    """Upload raw CSV for a symbol to S3, skipping if the file already exists."""
+def upload_symbol(s3_client, bucket: str, prefix: str, symbol: str, run_date: str, yf_cfg: dict) -> bool:
+    """Upload raw CSV for a symbol to S3, skipping if the file already exists.
+
+    Returns True if the file was uploaded, False if it was skipped.
+    """
     key = f"{prefix}/{symbol}/{run_date}.csv"
 
     if s3_key_exists(s3_client, bucket, key):
         logger.info("Already exists, skipping: s3://%s/%s", bucket, key)
-        return
+        return False
 
     csv_data = fetch_raw_csv(
         symbol,
@@ -75,31 +77,44 @@ def upload_symbol(s3_client, bucket: str, prefix: str, symbol: str, run_date: st
         ContentType="text/csv",
     )
     logger.info("Uploaded: s3://%s/%s", bucket, key)
+    return True
 
 
 def main() -> None:
+    env = os.environ.get("ENV", "dev")
     cfg = load_config("ingest.yaml")
 
     ssm_params = cfg["ssm"]["parameters"]
     ssm_region = cfg["ssm"]["region"]
 
-    bucket  = get_parameter(ssm_params["s3_bucket_raw"], region=ssm_region)
-    symbols_raw = get_parameter(ssm_params["symbols"], region=ssm_region, required=False) or cfg["defaults"]["symbols"]
-    region  = get_parameter(ssm_params["aws_region"], region=ssm_region, required=False) or cfg["defaults"]["aws_region"]
-    prefix  = cfg["s3"]["raw_prefix"]
-    yf_cfg  = cfg["yfinance"]
+    setup_logging("ingest", env)
+    metrics = StageMetrics("ingest", region=ssm_region, env=env)
+    metrics.start()
 
-    symbols  = [s.strip() for s in symbols_raw.split(",") if s.strip()]
-    run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        bucket      = get_parameter(ssm_params["s3_bucket_raw"], region=ssm_region)
+        symbols_raw = get_parameter(ssm_params["symbols"], region=ssm_region, required=False) or cfg["defaults"]["symbols"]
+        region      = get_parameter(ssm_params["aws_region"], region=ssm_region, required=False) or cfg["defaults"]["aws_region"]
+        prefix      = cfg["s3"]["raw_prefix"]
+        yf_cfg      = cfg["yfinance"]
 
-    logger.info("Starting ingestion — bucket=%s symbols=%s run_date=%s", bucket, symbols, run_date)
+        symbols  = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+        run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    s3 = boto3.client("s3", region_name=region)
+        logger.info("Starting ingestion — bucket=%s symbols=%s run_date=%s", bucket, symbols, run_date)
 
-    for symbol in symbols:
-        upload_symbol(s3, bucket, prefix, symbol, run_date, yf_cfg)
+        s3 = boto3.client("s3", region_name=region)
 
-    logger.info("Ingestion complete.")
+        files_uploaded = 0
+        for symbol in symbols:
+            if upload_symbol(s3, bucket, prefix, symbol, run_date, yf_cfg):
+                files_uploaded += 1
+
+        logger.info("Ingestion complete.")
+        metrics.finish(files_processed=files_uploaded)
+    except Exception:
+        metrics.finish(success=False)
+        raise
 
 
 if __name__ == "__main__":
