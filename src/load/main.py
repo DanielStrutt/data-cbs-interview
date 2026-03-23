@@ -18,13 +18,11 @@ import os
 import boto3
 import duckdb
 
+from src.monitoring.logger import setup_logging
+from src.monitoring.metrics import StageMetrics
 from src.utils.config_loader import load_config
 from src.utils.get_parameter import get_parameter
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 CREATE_TABLE_SQL = """
@@ -70,60 +68,67 @@ def list_parquet_files(s3_client, bucket: str, prefix: str) -> list[str]:
 
 
 def main() -> None:
+    env = os.environ.get("ENV", "dev")
     cfg = load_config("load.yaml")
 
     ssm_params = cfg["ssm"]["parameters"]
     ssm_region = cfg["ssm"]["region"]
 
-    staging_bucket   = get_parameter(ssm_params["s3_bucket_staging"], region=ssm_region)
-    motherduck_token = get_parameter(ssm_params["motherduck_token"], region=ssm_region)
-    region           = get_parameter(ssm_params["aws_region"], region=ssm_region, required=False) or cfg["defaults"]["aws_region"]
+    setup_logging("load", env)
+    metrics = StageMetrics("load", region=ssm_region, env=env)
+    metrics.start()
 
-    # Database name matches the environment (dev/prod) so it's driven by ENV
-    md_db     = os.environ.get("ENV", "dev")
-    md_schema = cfg["motherduck"]["schema"]
-    md_table  = cfg["motherduck"]["table"]
-    full_table = f"{md_db}.{md_schema}.{md_table}"
-    processed_prefix = cfg["s3"]["processed_prefix"]
+    try:
+        staging_bucket   = get_parameter(ssm_params["s3_bucket_staging"], region=ssm_region)
+        motherduck_token = get_parameter(ssm_params["motherduck_token"], region=ssm_region)
+        region           = get_parameter(ssm_params["aws_region"], region=ssm_region, required=False) or cfg["defaults"]["aws_region"]
 
-    # Connect to MotherDuck and verify
-    logger.info("Connecting to MotherDuck database: %s ...", md_db)
-    con = duckdb.connect(f"md:{md_db}?motherduck_token={motherduck_token}")
-    con.execute("SELECT 1").fetchone()
-    logger.info("Connected to MotherDuck database: %s", md_db)
+        # Database name matches the environment (dev/prod) so it's driven by ENV
+        md_db     = env
+        md_schema = cfg["motherduck"]["schema"]
+        md_table  = cfg["motherduck"]["table"]
+        full_table = f"{md_db}.{md_schema}.{md_table}"
+        processed_prefix = cfg["s3"]["processed_prefix"]
 
-    # Configure DuckDB S3 access using current AWS credentials
-    session = boto3.Session(region_name=region)
-    creds = session.get_credentials().get_frozen_credentials()
-    con.execute(f"SET s3_region='{region}'")
-    con.execute(f"SET s3_access_key_id='{creds.access_key}'")
-    con.execute(f"SET s3_secret_access_key='{creds.secret_key}'")
-    if creds.token:
-        con.execute(f"SET s3_session_token='{creds.token}'")
+        # Connect to MotherDuck and verify
+        logger.info("Connecting to MotherDuck database: %s ...", md_db)
+        con = duckdb.connect(f"md:{md_db}?motherduck_token={motherduck_token}")
+        con.execute("SELECT 1").fetchone()
+        logger.info("Connected to MotherDuck database: %s", md_db)
 
-    # Ensure table exists
-    con.execute(CREATE_TABLE_SQL.format(table=full_table))
-    logger.info("Table ready: %s", full_table)
+        # Configure DuckDB S3 access using current AWS credentials
+        session = boto3.Session(region_name=region)
+        creds = session.get_credentials().get_frozen_credentials()
+        con.execute(f"SET s3_region='{region}'")
+        con.execute(f"SET s3_access_key_id='{creds.access_key}'")
+        con.execute(f"SET s3_secret_access_key='{creds.secret_key}'")
+        if creds.token:
+            con.execute(f"SET s3_session_token='{creds.token}'")
 
-    # List and load Parquet files
-    s3 = boto3.client("s3", region_name=region)
-    parquet_keys = list_parquet_files(s3, staging_bucket, processed_prefix)
-    logger.info("Found %d Parquet file(s) to load", len(parquet_keys))
+        # Ensure table exists
+        con.execute(CREATE_TABLE_SQL.format(table=full_table))
+        logger.info("Table ready: %s", full_table)
 
-    for key in parquet_keys:
-        sql = INSERT_SQL.format(table=full_table, bucket=staging_bucket, key=key)
-        con.execute(sql)
-        logger.info("Loaded s3://%s/%s", staging_bucket, key)
+        # List and load Parquet files
+        s3 = boto3.client("s3", region_name=region)
+        parquet_keys = list_parquet_files(s3, staging_bucket, processed_prefix)
+        logger.info("Found %d Parquet file(s) to load", len(parquet_keys))
 
-    # Row count after all inserts
-    total_rows = con.execute(f"SELECT COUNT(*) FROM {full_table}").fetchone()[0]
-    con.close()
-    logger.info("Load complete. Total rows in %s: %d", full_table, total_rows)
+        for key in parquet_keys:
+            sql = INSERT_SQL.format(table=full_table, bucket=staging_bucket, key=key)
+            con.execute(sql)
+            logger.info("Loaded s3://%s/%s", staging_bucket, key)
+
+        # Row count after all inserts
+        total_rows = con.execute(f"SELECT COUNT(*) FROM {full_table}").fetchone()[0]
+        con.close()
+        logger.info("Load complete. Total rows in %s: %d", full_table, total_rows)
+        metrics.finish(files_processed=len(parquet_keys), rows_processed=total_rows)
+    except BaseException:
+        metrics.finish(success=False)
+        logger.exception("Load pipeline failed")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except BaseException:
-        logger.exception("Load pipeline failed")
-        raise SystemExit(1)
+    main()
